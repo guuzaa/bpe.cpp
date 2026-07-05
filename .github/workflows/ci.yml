@@ -14,20 +14,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
         include:
           - os: ubuntu-latest
             compiler: GCC
-            install: sudo apt-get update && sudo apt-get install -y build-essential ninja-build clang-format-14
+            install: sudo apt-get update && sudo apt-get install -y build-essential ninja-build clang-format
             build-mode: asan
           - os: macos-latest
             compiler: Clang
             install: "brew install ninja clang-format"
             build-mode: release
-        #   - os: windows-latest
-        #     compiler: MSVC
-        #     install: "choco install ninja"
-        #     build-mode: release
 
     steps:
     - uses: actions/checkout@v4
@@ -40,8 +36,7 @@ jobs:
       run: ${{ matrix.install }}
 
     - name: Build 
-      run: cmake --preset ${{ matrix.build-mode }} |
-            cmake --build --preset ${{ matrix.build-mode }}
+      run: cmake --preset ${{ matrix.build-mode }} && cmake --build --preset ${{ matrix.build-mode }}
 
     - name: Check Format
       if: runner.os != 'Windows'
