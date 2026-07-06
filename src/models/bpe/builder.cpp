@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "absl/status/status.h"
+#include "bpe/bpe.h"
 #include "models/bpe/bpe_impl.h"
 #include "models/bpe/serialization.h"
 

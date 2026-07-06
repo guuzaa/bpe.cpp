@@ -1,8 +1,8 @@
 // tests/test_bpe.cpp — M2: BPE 端到端测试(构造微型 vocab + merges,验证 encode)
-#include <gtest/gtest.h>
 #include <cstdio>
-#include <fstream>
 #include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
 
 #include "bpe/bpe.h"
 
