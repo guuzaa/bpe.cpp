@@ -1,47 +1,33 @@
 // utils/bytes_char.cpp
 #include "utils/bytes_char.h"
+#include <cstdint>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 namespace bpe::util {
 
 namespace {
 
 // 构造与 HF byte_level.rs::bytes_char 完全一致的映射表
-std::array<uint32_t, 256> build_table() {
+constexpr std::array<uint32_t, 256> build_table() {
     std::array<uint32_t, 256> cs{};
-    // 第一段:可打印 ASCII + 拉丁 1 段
-    std::vector<uint8_t> bs;
-    bs.reserve(256);
-    for (int b = 0x21; b <= 0x7E; ++b) {
-        bs.push_back(static_cast<uint8_t>(b));
+    // 可见字节(可打印 ASCII + 拉丁 1 段)→ 原字节自身
+    for (uint32_t b = 0x21; b <= 0x7Eu; ++b) {
+        cs[b] = b;
     }
-    for (int b = 0xA1; b <= 0xAC; ++b) {
-        bs.push_back(static_cast<uint8_t>(b));
+    for (uint32_t b = 0xA1; b <= 0xACu; ++b) {
+        cs[b] = b;
     }
-    for (int b = 0xAE; b <= 0xFF; ++b) {
-        bs.push_back(static_cast<uint8_t>(b));
+    for (uint32_t b = 0xAE; b <= 0xFFu; ++b) {
+        cs[b] = b;
     }
 
-    // cs[i] = bs[i] 自身(对前 223 个)
-    for (std::size_t i = 0; i < bs.size(); ++i) {
-        cs[bs[i]] = bs[i];
-    }
-
-    // 其余 33 个控制字节 → U+0100 + n
+    // 其余控制字节 → U+0100 + n(按字节升序连续编号)
+    // 可见字节均 ≥ 0x21,故 cs[b]==0 即可作为"控制字节"判据
     uint32_t n = 0;
-    for (int b = 0; b <= 0xFF; ++b) {
-        // 若 b 不在 bs 中
-        bool in_bs = false;
-        for (auto x : bs) {
-            if (x == b) {
-                in_bs = true;
-                break;
-            }
-        }
-        if (!in_bs) {
-            cs[static_cast<uint8_t>(b)] = 0x100u + n;
+    for (uint32_t b = 0; b <= 0xFFu; ++b) {
+        if (cs[b] == 0) {
+            cs[b] = 0x100u + n;
             ++n;
         }
     }
@@ -51,7 +37,7 @@ std::array<uint32_t, 256> build_table() {
 }  // namespace
 
 const std::array<uint32_t, 256>& bytes_to_chars() noexcept {
-    static const std::array<uint32_t, 256> table = build_table();
+    static constexpr std::array<uint32_t, 256> table = build_table();
     return table;
 }
 
@@ -60,8 +46,8 @@ int char_to_byte(uint32_t cp) noexcept {
     static const std::unordered_map<uint32_t, uint8_t> rev = [] {
         std::unordered_map<uint32_t, uint8_t> m;
         const auto& fwd = bytes_to_chars();
-        for (int b = 0; b <= 0xFF; ++b) {
-            m.emplace(fwd[static_cast<uint8_t>(b)], static_cast<uint8_t>(b));
+        for (uint32_t b = 0; b <= 0xFFu; ++b) {
+            m.emplace(fwd[b], static_cast<uint8_t>(b));
         }
         return m;
     }();

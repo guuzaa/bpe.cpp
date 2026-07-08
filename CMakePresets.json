@@ -9,7 +9,8 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/_deps"
       }
     },
     {
@@ -29,6 +30,15 @@
       }
     },
     {
+      "name": "bench",
+      "displayName": "RelWithDebInfo (Ninja)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "BPE_BUILD_BENCH": "ON"
+      }
+    },
+    {
       "name": "asan",
       "displayName": "Debug + AddressSanitizer (Ninja)",
       "inherits": "debug",
@@ -42,7 +52,8 @@
   "buildPresets": [
     { "name": "debug",   "configurePreset": "debug"   },
     { "name": "release", "configurePreset": "release" },
-    { "name": "asan",    "configurePreset": "asan"    }
+    { "name": "asan",    "configurePreset": "asan"    },
+    { "name": "bench",    "configurePreset": "bench"  }
   ],
   "testPresets": [
     {

@@ -5,12 +5,14 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_split.h"
 #include "bpe/bpe.h"
 #include "bpe/decoders.h"
 #include "bpe/normalizers.h"
 #include "bpe/pretokenizers.h"
 #include "core/tokenizer_impl.h"
 #include "nlohmann/json.hpp"
+#include "normalizers/internal.h"
 #include "pretokenizers/byte_level.h"
 
 namespace bpe {
@@ -292,15 +294,15 @@ absl::StatusOr<std::unique_ptr<Tokenizer>> Tokenizer::from_file(const std::strin
         }
         MergeList merges;
         if (m.contains("merges")) {
-            for (auto& mr : m["merges"]) {
+            for (const auto& mr : m["merges"]) {
                 if (mr.is_array() && mr.size() == 2) {
                     merges.emplace_back(mr[0].get<std::string>(), mr[1].get<std::string>());
                 } else if (mr.is_string()) {
                     // 兼容旧格式 "a b"
                     std::string s = mr.get<std::string>();
-                    auto sp = s.find(' ');
-                    if (sp != std::string::npos) {
-                        merges.emplace_back(s.substr(0, sp), s.substr(sp + 1));
+                    std::vector<std::string> parts = absl::StrSplit(s, ' ', absl::SkipEmpty());
+                    if (parts.size() == 2) {
+                        merges.emplace_back(parts[0], parts[1]);
                     }
                 }
             }
@@ -369,28 +371,15 @@ absl::StatusOr<std::unique_ptr<Tokenizer>> Tokenizer::from_file(const std::strin
         std::string type = (n.contains("type") && n["type"].is_string()) ? n["type"].get<std::string>() : "Sequence";
         if (type == "Sequence" && n.contains("normalizers") && n["normalizers"].is_array()) {
             std::vector<std::unique_ptr<Normalizer>> ns;
+            ns.reserve(n["normalizers"].size());
             for (auto& sub : n["normalizers"]) {
                 std::string st =
                     (sub.contains("type") && sub["type"].is_string()) ? sub["type"].get<std::string>() : "Identity";
-                if (st == "Lowercase") {
-                    ns.push_back(make_lowercase_normalizer());
-                } else if (st == "Uppercase") {
-                    ns.push_back(make_uppercase_normalizer());
-                } else if (st == "Strip") {
-                    ns.push_back(make_strip_normalizer());
-                } else {
-                    ns.push_back(make_identity_normalizer());
-                }
+                ns.push_back(make_normalizer(parse_normalizer_kind(st)));
             }
             tok->set_normalizer(make_sequence_normalizer(std::move(ns)));
-        } else if (type == "Lowercase") {
-            tok->set_normalizer(make_lowercase_normalizer());
-        } else if (type == "Uppercase") {
-            tok->set_normalizer(make_uppercase_normalizer());
-        } else if (type == "Strip") {
-            tok->set_normalizer(make_strip_normalizer());
         } else {
-            tok->set_normalizer(make_identity_normalizer());
+            tok->set_normalizer(make_normalizer(parse_normalizer_kind(type)));
         }
     }
 

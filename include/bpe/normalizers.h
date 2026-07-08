@@ -7,13 +7,6 @@
 
 namespace bpe {
 
-enum class NormalizerKind {
-    kIdentity,
-    kStrip,      // 去首尾空白
-    kLowercase,  // ASCII / 基本多语言平面 tolower(不依赖 ICU)
-    kUppercase,
-};
-
 // Identity normalizer:不改变字符串
 std::unique_ptr<Normalizer> make_identity_normalizer();
 

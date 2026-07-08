@@ -97,12 +97,26 @@ if(BPE_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
 endif()
 
+if(BPE_BUILD_BENCH)
+  FetchContent_Declare(
+    benchmark
+    GIT_REPOSITORY https://github.com/google/benchmark.git
+    GIT_TAG        v1.9.5
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(benchmark)
+endif()
+
 # ---- 子目录 -----------------------------------------------------------------
 add_subdirectory(src)
 
 if(BPE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(BPE_BUILD_BENCH)
+  add_subdirectory(benches)
 endif()
 
 add_subdirectory(examples)

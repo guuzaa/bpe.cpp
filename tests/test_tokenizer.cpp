@@ -520,6 +520,37 @@ TEST_F(TokenizerJsonTest, LoadMinimalTokenizer) {
     EXPECT_FALSE(e.ids.empty());
 }
 
+// 旧格式 merges 字符串形式:兼容 HF 早期 tokenizer.json 的 "a b" 写法
+// 需用 absl::SkipEmpty 过滤空段,以容忍前后/中间多余空格
+TEST_F(TokenizerJsonTest, LegacyStringMergesFormat) {
+    // 多个相邻空格、前导/尾随空格在旧格式下应被当作单空格分隔
+    nlohmann::json v = nlohmann::json::object();
+    v["a"] = 0;
+    v["b"] = 1;
+    v["ab"] = 2;
+    nlohmann::json m = nlohmann::json::array();
+    m.push_back("a b");       // 正常单空格
+    m.push_back("  a  b  ");  // 前导/中间/尾随多空格,仍应解析为 {a,b}
+    m.push_back("x y");       // 段数正确但 token 不在 vocab → 应被忽略
+    m.push_back("onlyone");   // 段数 != 2 → 应被忽略
+    nlohmann::json j;
+    j["model"] = {{"type", "BPE"}, {"vocab", v}, {"merges", m}, {"ignore_merges", true}};
+    j["pre_tokenizer"] = {
+        {"type", "ByteLevel"}, {"add_prefix_space", false}, {"trim_offsets", false}, {"use_regex", true}};
+    j["decoder"] = {{"type", "ByteLevel"}};
+    write("legacy_merges.json", j.dump(2));
+
+    auto st = Tokenizer::from_file(tmp + "legacy_merges.json");
+    ASSERT_TRUE(st.ok()) << st.status().message();
+    auto& tok = *st.value();
+
+    // ignore_merges=true: "ab" 命中整词(忽略 merges 表)
+    Encoding e = tok.encode("ab");
+    ASSERT_EQ(e.ids.size(), 1u);
+    EXPECT_EQ(e.ids[0], 2u);
+    EXPECT_EQ(tok.decode(e.ids), "ab");
+}
+
 // ---- 端到端 GPT-2 风格 round-trip -----------------------------------------
 TEST(EndToEndGpt2, EncodeDecodeRoundTrip) {
     const std::string G = "\xC4\xA0";

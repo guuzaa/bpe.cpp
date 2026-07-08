@@ -39,7 +39,7 @@ jobs:
       run: cmake --preset ${{ matrix.build-mode }} && cmake --build --preset ${{ matrix.build-mode }}
 
     - name: Check Format
-      if: runner.os != 'Windows'
+      if: runner.os == 'macOS'
       run: cmake --build --preset ${{ matrix.build-mode }} --target check-format
 
     - name: Test

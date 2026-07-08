@@ -1,7 +1,9 @@
 // models/bpe/serialization.cpp
 #include "models/bpe/serialization.h"
 #include <fstream>
+#include <utility>
 
+#include "absl/strings/str_split.h"
 #include "nlohmann/json.hpp"
 
 namespace bpe::bpe_internal {
@@ -43,18 +45,17 @@ absl::StatusOr<MergeList> read_merges_txt(const std::string& path) {
         if (line.empty() || line[0] == '#') {
             continue;
         }
-        // 按第一个空格拆分 "a b"
-        auto sp = line.find(' ');
-        if (sp == std::string::npos) {
+        // 按第一个空格拆分 "a b"(MaxSplits 保留 b 中后续空格)
+        std::vector<std::string> parts = absl::StrSplit(line, absl::MaxSplits(' ', 1));
+        if (parts.size() != 2) {
             continue;  // 格式不合法,跳过
         }
-        std::string a = line.substr(0, sp);
-        std::string b = line.substr(sp + 1);
         // 去掉 b 末尾可能的 \r(Windows 换行)
+        std::string& b = parts[1];
         if (!b.empty() && b.back() == '\r') {
             b.pop_back();
         }
-        merges.emplace_back(std::move(a), std::move(b));
+        merges.emplace_back(std::move(parts[0]), std::move(b));
     }
     return merges;
 }
