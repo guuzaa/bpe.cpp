@@ -12,8 +12,10 @@
 // 注意:本头文件是 BPE 模型的内部头,不进 include/bpe/ 公共 API。
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -35,19 +37,22 @@ struct MergeValue {
     TokenId merged_id;
 };
 
-// 编码端的合并候选(最大堆行为,弹出 (rank,pos) 最小者)
+// 编码端的合并候选;与 d_heap<..., std::greater> 组成最小堆,弹出 (rank,pos) 最小者
 struct EncodeMerge {
     uint32_t pos;  // 符号索引
     uint32_t rank;
     TokenId new_id;
 
-    // 反向比较:rank 小者优先,pos 小者优先;std::less → 最大堆 top 是最大值,
-    // 因此这里返回 "this 比 o 小" 当 this 的 (rank,pos) 更大
+    // 自然序:(rank, pos) 字典序更小者优先
     bool operator<(const EncodeMerge& o) const noexcept {
         if (rank != o.rank) {
-            return rank > o.rank;
+            return rank < o.rank;
         }
-        return pos > o.pos;
+        return pos < o.pos;
+    }
+
+    bool operator>(const EncodeMerge& o) const noexcept {
+        return o < *this;
     }
 };
 
@@ -80,17 +85,11 @@ class Word {
     }
 
     std::size_t size() const noexcept {
-        std::size_t n = 0;
-        for (const auto& s : symbols_) {
-            if (s.len != 0) {
-                ++n;
-            }
-        }
-        return n;
+        return live_count_;
     }
 
     bool empty() const noexcept {
-        return size() == 0;
+        return live_count_ == 0;
     }
 
     // 返回当前所有活跃 token 的 id 序列(按顺序)
@@ -102,25 +101,30 @@ class Word {
 
    private:
     template <typename MergeMapT>
-    bool try_push_pair(std::int32_t i, const MergeMapT& merges, util::d_heap<EncodeMerge, 4>& heap) const;
+    bool try_push_pair(std::int32_t i, const MergeMapT& merges,
+                       util::d_heap<EncodeMerge, 4, std::greater<EncodeMerge>>& heap) const;
 
     void compact();  // 移除 len==0 的死符号(在 merge_all 末尾调用)
 
     // 安全下标:int32_t → size_t 的显式转换(调用方须保证 i >= 0)
     Symbol& sym(std::int32_t i) {
+        assert(i >= 0 && static_cast<std::size_t>(i) < symbols_.size());
         return symbols_[static_cast<std::size_t>(i)];
     }
 
     const Symbol& sym(std::int32_t i) const {
+        assert(i >= 0 && static_cast<std::size_t>(i) < symbols_.size());
         return symbols_[static_cast<std::size_t>(i)];
     }
 
     std::vector<Symbol> symbols_{};
+    std::size_t live_count_{0};
 };
 
 // ---- 模板实现 ---------------------------------------------------------------
 template <typename MergeMapT>
-bool Word::try_push_pair(std::int32_t i, const MergeMapT& merges, util::d_heap<EncodeMerge, 4>& heap) const {
+bool Word::try_push_pair(std::int32_t i, const MergeMapT& merges,
+                         util::d_heap<EncodeMerge, 4, std::greater<EncodeMerge>>& heap) const {
     if (i < 0) {
         return false;
     }
@@ -153,7 +157,7 @@ void Word::merge_all(const MergeMapT& merges, std::optional<float> dropout) {
     std::mt19937 rng{std::random_device{}()};
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
-    util::d_heap<EncodeMerge, 4> heap;
+    util::d_heap<EncodeMerge, 4, std::greater<EncodeMerge>> heap;
     std::vector<EncodeMerge> skipped;
     skipped.reserve(8);
 
@@ -196,6 +200,7 @@ void Word::merge_all(const MergeMapT& merges, std::optional<float> dropout) {
         sym(i).len += sym(j).len;
         sym(i).next = sym(j).next;
         sym(j).len = 0;
+        --live_count_;
         std::int32_t n2 = sym(i).next;
         if (n2 >= 0) {
             sym(n2).prev = i;

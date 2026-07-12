@@ -55,9 +55,8 @@ int char_to_byte(uint32_t cp) noexcept {
     return it == rev.end() ? -1 : it->second;
 }
 
-std::string byte_to_string(uint8_t b) {
-    uint32_t cp = bytes_to_chars()[b];
-    std::string out;
+void append_byte_char(std::string& out, uint8_t b) {
+    const uint32_t cp = bytes_to_chars()[b];
     if (cp < 0x80) {
         out.push_back(static_cast<char>(cp));
     } else if (cp < 0x800) {
@@ -68,12 +67,17 @@ std::string byte_to_string(uint8_t b) {
         out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
         out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
     } else {
-        // U+10000 以上(本表不会出现)
         out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
         out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
         out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
         out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
     }
+}
+
+std::string byte_to_string(uint8_t b) {
+    std::string out;
+    out.reserve(3);
+    append_byte_char(out, b);
     return out;
 }
 

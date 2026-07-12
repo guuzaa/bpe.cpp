@@ -1,7 +1,8 @@
 // pretokenizers/byte_level.cpp
 #include "pretokenizers/byte_level.h"
+
+#include <algorithm>
 #include <cstdint>
-#include <cstring>
 #include <vector>
 
 #include "utils/bytes_char.h"
@@ -15,10 +16,11 @@ namespace {
 constexpr std::string_view kGpt2Pattern =
     "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+";
 
-// 判断 codepoint 是否为空白(对应 Rust 的 char::is_whitespace)
-// 取 Unicode White_Space 属性的常见子集 + byte-char 的空格(U+0120)
+// 判断 codepoint 是否为空白(Unicode White_Space 子集 + byte-char 空格 U+0120)
 bool is_whitespace_cp(uint32_t cp) {
-    // 标准 Unicode 空白
+    if (cp == util::bytes_to_chars()[0x20]) {
+        return true;  // U+0120 'Ġ'
+    }
     switch (cp) {
         case 0x09:
         case 0x0A:
@@ -32,46 +34,82 @@ bool is_whitespace_cp(uint32_t cp) {
         case 0x2007:
         case 0x2028:
         case 0x2029:
-        // 0x2000..0x200A, 0x202F, 0x205F, 0x3000
         case 0x202F:
         case 0x205F:
         case 0x3000:
             return true;
         default:
-            if (cp >= 0x2000 && cp <= 0x200A) {
-                return true;
-            }
-            return false;
+            return cp >= 0x2000 && cp <= 0x200A;
     }
+}
+
+// 把 segment 字节映射为 byte-char,并生成相对段起点的 alignment
+void map_segment(std::string_view segment, std::string& mapped, std::vector<uint32_t>& align) {
+    mapped.clear();
+    align.clear();
+    mapped.reserve(segment.size() * 2);
+    align.reserve(segment.size() * 2);
+    for (std::size_t bi = 0; bi < segment.size(); ++bi) {
+        const std::size_t before = mapped.size();
+        util::append_byte_char(mapped, static_cast<uint8_t>(segment[bi]));
+        for (std::size_t k = before; k < mapped.size(); ++k) {
+            align.push_back(static_cast<uint32_t>(bi));
+        }
+    }
+}
+
+// 父 text 字节下标 → 相对父 offsets.first 的偏移;空 alignment = 恒等
+uint32_t map_parent_byte(uint32_t idx, const std::vector<uint32_t>& parent_alignment) {
+    if (parent_alignment.empty()) {
+        return idx;
+    }
+    if (idx >= parent_alignment.size()) {
+        return parent_alignment.back();
+    }
+    return parent_alignment[idx];
+}
+
+// text 上 [sp_start, sp_end) 映回「未加 prefix 的 pt.text」字节区间 [rel_start, rel_end)
+// did_prefix: text[0] 是我们插入的空格,不计入原文
+void span_to_original(std::size_t sp_start, std::size_t sp_end, bool did_prefix, uint32_t& rel_start,
+                      uint32_t& rel_end) {
+    if (!did_prefix) {
+        rel_start = static_cast<uint32_t>(sp_start);
+        rel_end = static_cast<uint32_t>(sp_end);
+        return;
+    }
+    // text = ' ' + original; 原文偏移 = max(0, pos - 1)
+    const auto shift = [](std::size_t pos) -> uint32_t {
+        return pos == 0 ? 0u : static_cast<uint32_t>(pos - 1);
+    };
+    rel_start = shift(sp_start);
+    rel_end = shift(sp_end);
 }
 
 }  // namespace
 
 ByteLevel::ByteLevel(bool add_prefix_space, bool trim_offsets, bool use_regex)
-    : add_prefix_space_(add_prefix_space), trim_offsets_(trim_offsets), use_regex_(use_regex), regex_(kGpt2Pattern) {
+    : add_prefix_space_(add_prefix_space), trim_offsets_(trim_offsets), use_regex_(use_regex) {
+    if (use_regex_) {
+        regex_ = std::make_unique<Regex>(kGpt2Pattern);
+    }
 }
 
 std::string ByteLevel::encode_bytes(std::string_view s) {
-    // 把每个字节映射为对应的 byte-char(可能 1~3 字节 UTF-8)
-    const auto& table = util::bytes_to_chars();
     std::string out;
-    out.reserve(s.size() * 2);  // 平均估计
+    out.reserve(s.size() * 2);
     for (char ch : s) {
-        out += util::byte_to_string(static_cast<unsigned char>(ch));
+        util::append_byte_char(out, static_cast<unsigned char>(ch));
     }
-    (void)table;
     return out;
 }
 
 std::string ByteLevel::decode_bytes(std::string_view s) {
-    // 按 UTF-8 码点遍历,每个码点查反向表得到字节
     std::string out;
     out.reserve(s.size());
-    util::codepoint_iter it(s);
-    for (auto v : it) {
+    for (auto v : util::codepoint_iter(s)) {
         int b = util::char_to_byte(v.cp);
         if (b < 0) {
-            // 非映射字符:保留原 UTF-8 字节(对应 HF unwrap_or_else 分支)
             out.append(v.bytes.data(), v.bytes.size());
         } else {
             out.push_back(static_cast<char>(b));
@@ -82,76 +120,60 @@ std::string ByteLevel::decode_bytes(std::string_view s) {
 
 void ByteLevel::pre_tokenize(PreTokenizedString& s) const {
     auto& pretokens = s.tokens();
-    // 准备输出
     std::vector<PreToken> out;
     out.reserve(pretokens.size() * 2);
 
     for (auto& pt : pretokens) {
-        // 1. 取出 normalized 子串(此处用 pt.text;M2 的 NormalizedString 暂未完整对齐)
-        std::string text = pt.text;
+        // 是否在本段前插入了 prefix space(与 offset 修正共用同一条件)
+        const bool did_prefix = add_prefix_space_ && (pt.text.empty() || pt.text.front() != ' ');
 
-        // 2. add_prefix_space:若不以 ' ' 开头则前置一个空格
-        if (add_prefix_space_ && (text.empty() || text.front() != ' ')) {
-            text.insert(text.begin(), ' ');
+        std::string text;
+        if (did_prefix) {
+            text.reserve(pt.text.size() + 1);
+            text.push_back(' ');
+            text.append(pt.text);
+        } else {
+            text = pt.text;
         }
 
-        // 3. 用正则切分(若 use_regex=false,整段作为一个 split)
         std::vector<std::pair<std::size_t, std::size_t>> spans;
-        if (use_regex_ && regex_.valid()) {
-            spans = regex_.find_all(text);
+        if (use_regex_ && regex_ && regex_->valid()) {
+            spans = regex_->find_all(text);
         }
-        if (spans.empty()) {
-            // 无切分(或 use_regex=false):整段作为单个 split
-            if (!text.empty()) {
-                spans.emplace_back(0, text.size());
-            }
+        if (spans.empty() && !text.empty()) {
+            spans.emplace_back(0, text.size());
         }
 
-        // 4. 对每个 split 做字节映射
-        // 偏移对齐:add_prefix_space 改变了 text 与原 pt.offsets 的关系
-        // 这里我们直接以映射后的 byte-char 字符串作为 PreToken.text,
-        // 偏移以原 pt.offsets 起点为基准 + (split.start, split.end) 在 text 中的位置
-        // 注意:add_prefix_space 若加了 1 字节空格,需要把 split 偏移扣 1(对齐回原文)
         const uint32_t base = pt.offsets.first;
         for (auto [sp_start, sp_end] : spans) {
-            std::string segment = text.substr(sp_start, sp_end - sp_start);
+            const std::string_view segment(text.data() + sp_start, sp_end - sp_start);
 
-            // 逐字节映射为 byte-char,同时构建 alignment 表:
-            // alignment[i] = mapped 第 i 字节对应 segment 内的第几个原始字节
             std::string mapped;
-            std::vector<uint32_t> align;
-            mapped.reserve(segment.size() * 2);
-            align.reserve(segment.size() * 2);
-            for (std::size_t bi = 0; bi < segment.size(); ++bi) {
-                std::string bc = util::byte_to_string(static_cast<uint8_t>(segment[bi]));
-                for (std::size_t k = 0; k < bc.size(); ++k) {
-                    mapped.push_back(bc[k]);
-                    align.push_back(static_cast<uint32_t>(bi));
+            std::vector<uint32_t> local_align;
+            map_segment(segment, mapped, local_align);
+
+            uint32_t rel_start = 0;
+            uint32_t rel_end = 0;
+            span_to_original(sp_start, sp_end, did_prefix, rel_start, rel_end);
+
+            // offsets / alignment 均相对「本 PreToken 的 offsets.first」:
+            //   absolute = offsets.first + alignment[i]
+            // 父 alignment 非空时先映到父段内,再减去本段起点,保持上述契约。
+            const uint32_t span_origin = map_parent_byte(rel_start, pt.alignment);
+            const uint32_t off_start = base + span_origin;
+            uint32_t off_end = off_start;
+            if (rel_end > rel_start) {
+                off_end = base + map_parent_byte(rel_end - 1, pt.alignment) + 1;
+                if (off_end < off_start) {
+                    off_end = off_start;
                 }
             }
 
-            // 计算对齐到原文的字节偏移:
-            //   - 若 add_prefix_space 且加了空格,则原文偏移 = base + sp_start - 1
-            //     (但 sp_start=0 时,这个 split 包含了 prefix space,偏移应 clamp 到 base)
-            //   - 否则 = base + sp_start
-            uint32_t off_start = base;
-            uint32_t off_end = base;
-            if (add_prefix_space_ && (pt.text.empty() || pt.text.front() != ' ')) {
-                // 我们在 text 前加了一个空格,所以 split 的实际原文偏移要 -1
-                // 但若 sp_start == 0(split 含 prefix space),原文偏移起点 = base
-                int32_t shift_start = static_cast<int32_t>(sp_start) - 1;
-                int32_t shift_end = static_cast<int32_t>(sp_end) - 1;
-                if (shift_start < 0) {
-                    shift_start = 0;
-                }
-                if (shift_end < 0) {
-                    shift_end = 0;
-                }
-                off_start = base + static_cast<uint32_t>(shift_start);
-                off_end = base + static_cast<uint32_t>(shift_end);
-            } else {
-                off_start = base + static_cast<uint32_t>(sp_start);
-                off_end = base + static_cast<uint32_t>(sp_end);
+            std::vector<uint32_t> align;
+            align.reserve(local_align.size());
+            for (uint32_t bi : local_align) {
+                const uint32_t abs_in_parent = map_parent_byte(rel_start + bi, pt.alignment);
+                align.push_back(abs_in_parent - span_origin);
             }
 
             out.push_back(PreToken{std::move(mapped), {off_start, off_end}, std::move(align)});
@@ -161,9 +183,13 @@ void ByteLevel::pre_tokenize(PreTokenizedString& s) const {
 }
 
 std::string ByteLevel::decode(const std::vector<std::string>& tokens) const {
-    // 把所有 token 字符串拼起来,再一次性 decode_bytes
-    // 这样单个 token 末尾的 byte-char 与下一 token 开头的 byte-char 能正确组合
+    // 先拼接再 decode,使跨 token 的 multi-byte char 能正确组合
     std::string concat;
+    std::size_t total = 0;
+    for (const auto& t : tokens) {
+        total += t.size();
+    }
+    concat.reserve(total);
     for (const auto& t : tokens) {
         concat += t;
     }
@@ -172,59 +198,46 @@ std::string ByteLevel::decode(const std::vector<std::string>& tokens) const {
 
 void ByteLevel::trim_token_offsets(Token& t, std::size_t token_index) const {
     // 对应 HF process_offsets:
-    //   - 计算 t.value 中的前导/后导空白(用 byte-char 表示,空格 = U+0120 'Ġ')
-    //   - 前导:若是首个 token 且 add_prefix_space 且只有 1 个前导空格 → 保留(我们加的)
-    //   - 否则前导偏移 += leading
-    //   - 后导偏移 -= trailing
-    const uint32_t space_cp = util::bytes_to_chars()[0x20];  // U+0120
-
-    // 统计 t.value 的前导/后导"空白"码点数
-    // 注意:t.value 是 byte-char 字符串,空格对应 'Ġ'(U+0120, 2 字节)
-    std::size_t leading = 0, trailing = 0;
-    {
-        // 前导
-        util::codepoint_iter it(t.value);
-        for (auto v : it) {
-            if (v.cp == space_cp || is_whitespace_cp(v.cp)) {
-                ++leading;
-            } else {
-                break;
-            }
-        }
-        // 后导:反向扫描(用解码后的码点 vector)
-        std::vector<uint32_t> cps;
-        for (auto v : util::codepoint_iter(t.value)) {
-            cps.push_back(v.cp);
-        }
-        for (auto rit = cps.rbegin(); rit != cps.rend(); ++rit) {
-            if (*rit == space_cp || is_whitespace_cp(*rit)) {
-                ++trailing;
-            } else {
-                break;
-            }
-        }
+    //   按码点统计前导/后导空白;offsets 在 normalized 空间中,对 byte-level
+    //   空白(含 Ġ)每码点对应 1 个原始字节,故用码点数加减偏移与 HF 一致。
+    // 单次遍历收集码点,同时得到 leading / trailing。
+    std::vector<uint32_t> cps;
+    cps.reserve(t.value.size());
+    for (auto v : util::codepoint_iter(t.value)) {
+        cps.push_back(v.cp);
+    }
+    if (cps.empty()) {
+        return;
     }
 
+    std::size_t leading = 0;
+    while (leading < cps.size() && is_whitespace_cp(cps[leading])) {
+        ++leading;
+    }
+    std::size_t trailing = 0;
+    while (trailing < cps.size() - leading && is_whitespace_cp(cps[cps.size() - 1 - trailing])) {
+        ++trailing;
+    }
     if (leading == 0 && trailing == 0) {
         return;
     }
 
-    if (leading > 0) {
-        bool is_first = (token_index == 0) || (t.offsets.first == 0);
-        if (is_first && add_prefix_space_ && leading == 1) {
-            leading = 0;  // 我们加的那个前导空格,保留
-        }
-        if (leading > 0) {
-            uint32_t add = static_cast<uint32_t>(leading);
-            uint32_t new_start =
-                (t.offsets.first + add < t.offsets.second) ? (t.offsets.first + add) : t.offsets.second;
-            t.offsets.first = new_start;
-        }
+    // 仅 token_index==0 视为「序列首 token」(不再用 offsets.first==0 误判)
+    if (leading > 0 && token_index == 0 && add_prefix_space_ && leading == 1) {
+        leading = 0;
     }
-    if (trailing > 0 && t.offsets.second >= trailing) {
-        uint32_t sub = static_cast<uint32_t>(trailing);
-        uint32_t new_end = (t.offsets.second - sub > t.offsets.first) ? (t.offsets.second - sub) : t.offsets.first;
-        t.offsets.second = new_end;
+
+    if (leading > 0) {
+        const uint32_t add = static_cast<uint32_t>(leading);
+        t.offsets.first = std::min(t.offsets.first + add, t.offsets.second);
+    }
+    if (trailing > 0) {
+        const uint32_t sub = static_cast<uint32_t>(trailing);
+        if (t.offsets.second >= t.offsets.first + sub) {
+            t.offsets.second -= sub;
+        } else {
+            t.offsets.second = t.offsets.first;
+        }
     }
 }
 
@@ -232,8 +245,7 @@ std::vector<Token> ByteLevel::process(std::vector<Token> tokens) const {
     if (!trim_offsets_) {
         return tokens;
     }
-    const std::size_t n = tokens.size();
-    for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
         trim_token_offsets(tokens[i], i);
     }
     return tokens;

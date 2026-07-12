@@ -6,6 +6,7 @@
 #include "absl/status/status.h"
 #include "models/bpe/bpe_impl.h"  // BPE::Impl 完整定义
 #include "models/bpe/trainer_impl.h"
+#include "utils/parallel.h"
 #include "utils/unicode.h"
 
 namespace bpe {
@@ -132,14 +133,7 @@ std::pair<std::vector<std::unique_ptr<Word>>, std::vector<uint64_t>> BpeTrainer:
     for (const auto& [word, count] : word_counts_) {
         auto w = std::make_unique<Word>();
         util::codepoint_iter it(word);
-        const std::size_t total = [&] {
-            std::size_t n = 0;
-            for (auto v : it) {
-                (void)v;
-                ++n;
-            }
-            return n;
-        }();
+        const std::size_t total = static_cast<std::size_t>(std::distance(it.begin(), it.end()));
         std::size_t idx = 0;
         for (auto v : it) {
             const bool is_first = (idx == 0);
@@ -191,20 +185,7 @@ std::unordered_map<Pair, PairStats, PairHash> BpeTrainer::Impl::count_pairs(
     if (n == 0) {
         return {};
     }
-
-    unsigned hw = std::thread::hardware_concurrency();
-    if (hw == 0) {
-        hw = 4;
-    }
-    if (hw > 16) {
-        hw = 16;
-    }
-    if (hw > n) {
-        hw = static_cast<unsigned>(n);
-    }
-    if (hw < 1) {
-        hw = 1;
-    }
+    const unsigned hw = util::decide_num_workers(n);
 
     std::vector<std::thread> threads;
     std::vector<std::unordered_map<Pair, PairStats, PairHash>> locals(hw);
@@ -320,19 +301,7 @@ void BpeTrainer::Impl::merge_loop(std::vector<std::unique_ptr<Word>>& words, con
         // 并行 apply merge 到所有相关 word
         // 把 positions 切片到若干线程,每个线程独占一段索引(无重叠)
         std::vector<uint32_t> pos_vec(top.positions.begin(), top.positions.end());
-        unsigned hw = std::thread::hardware_concurrency();
-        if (hw == 0) {
-            hw = 4;
-        }
-        if (hw > 16) {
-            hw = 16;
-        }
-        if (hw > pos_vec.size()) {
-            hw = static_cast<unsigned>(pos_vec.size());
-        }
-        if (hw < 1) {
-            hw = 1;
-        }
+        const unsigned hw = util::decide_num_workers(pos_vec.size());
 
         // 每线程局部 (Pair → delta) 累计,主线程归并到 pair_counts
         std::vector<std::unordered_map<Pair, int32_t, PairHash>> local_deltas(hw);

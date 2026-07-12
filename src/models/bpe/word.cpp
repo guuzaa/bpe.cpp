@@ -1,19 +1,17 @@
 // models/bpe/word.cpp — Word 实现
 #include "models/bpe/word.h"
-#include <utility>
+#include <limits>
 
 namespace bpe::bpe_internal {
 
 void Word::add(TokenId id, uint32_t byte_len) {
-    Symbol s;
-    s.c = id;
-    s.prev = static_cast<std::int32_t>(symbols_.size()) - 1;
-    s.next = -1;
-    s.len = byte_len;
+    assert(symbols_.size() < static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()));
+    const auto idx = static_cast<std::int32_t>(symbols_.size());
     if (!symbols_.empty()) {
-        symbols_.back().next = static_cast<std::int32_t>(symbols_.size());
+        symbols_.back().next = idx;
     }
-    symbols_.push_back(std::move(s));
+    symbols_.push_back(Symbol{id, idx - 1, -1, byte_len});
+    ++live_count_;
 }
 
 void Word::extend_last(uint32_t byte_len) {
@@ -75,6 +73,7 @@ std::vector<std::pair<Pair, int32_t>> Word::merge(TokenId c1, TokenId c2, TokenI
             sym(i).len = new_len;
             sym(i).next = n2;
             sym(j).len = 0;  // 标记死符号
+            --live_count_;
             if (n2 >= 0) {
                 sym(n2).prev = i;
             }
@@ -87,31 +86,26 @@ std::vector<std::pair<Pair, int32_t>> Word::merge(TokenId c1, TokenId c2, TokenI
 }
 
 void Word::compact() {
-    // 通过链表重链接 + erase-remove 把死符号剔除,并重建 prev/next 索引
+    // 剔除死符号,直接写成稠密双向链
     std::vector<Symbol> kept;
-    kept.reserve(symbols_.size());
-    // 建立旧索引 → 新索引的映射
-    std::vector<std::int32_t> remap(symbols_.size(), -1);
-    for (std::size_t i = 0; i < symbols_.size(); ++i) {
-        if (symbols_[i].len != 0) {
-            remap[i] = static_cast<std::int32_t>(kept.size());
-            kept.push_back(symbols_[i]);
+    kept.reserve(live_count_);
+    for (const auto& s : symbols_) {
+        if (s.len != 0) {
+            kept.push_back(s);
         }
     }
-    for (auto& s : kept) {
-        if (s.prev >= 0) {
-            s.prev = remap[static_cast<std::size_t>(s.prev)];
-        }
-        if (s.next >= 0) {
-            s.next = remap[static_cast<std::size_t>(s.next)];
-        }
+    const std::int32_t n = static_cast<std::int32_t>(kept.size());
+    for (std::int32_t i = 0; i < n; ++i) {
+        kept[static_cast<std::size_t>(i)].prev = i - 1;
+        kept[static_cast<std::size_t>(i)].next = (i + 1 < n) ? i + 1 : -1;
     }
     symbols_ = std::move(kept);
+    live_count_ = symbols_.size();
 }
 
 std::vector<TokenId> Word::ids() const {
     std::vector<TokenId> out;
-    out.reserve(symbols_.size());
+    out.reserve(live_count_);
     for (const auto& s : symbols_) {
         if (s.len != 0) {
             out.push_back(s.c);
@@ -122,7 +116,7 @@ std::vector<TokenId> Word::ids() const {
 
 std::vector<std::pair<uint32_t, uint32_t>> Word::offsets() const {
     std::vector<std::pair<uint32_t, uint32_t>> out;
-    out.reserve(symbols_.size());
+    out.reserve(live_count_);
     uint32_t cur = 0;
     for (const auto& s : symbols_) {
         if (s.len == 0) {

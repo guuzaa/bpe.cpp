@@ -8,8 +8,12 @@
 //     3. 把每个字节的 UTF-8 序列映射为 byte-char(如空格 0x20 → U+0120 'Ġ')
 //   Decoder:把 byte-char 序列还原为字节,再 from_utf8_lossy 拼成字符串
 //   PostProcessor:trim_offsets — 修剪 token 偏移中的前后导空白
+//
+// 注意:use_regex=false 时不编译正则(Decoder 工厂路径更轻)。
+//       若输入 PreToken 已有 alignment,输出会与之 compose。
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -48,17 +52,16 @@ class ByteLevel : public PreTokenizer, public Decoder, public PostProcessor {
 
     // 把一段普通字符串字节映射为 byte-char 字符串(供测试与外部使用)
     static std::string encode_bytes(std::string_view s);
-    // 把 byte-char 字符串还原为字节流(失败字节按 0xEF 0xBF 0xBD 替换)
+    // 把 byte-char 字符串还原为字节流(未映射码点保留原 UTF-8 字节)
     static std::string decode_bytes(std::string_view s);
 
    private:
-    // 修剪单个 token 的前后导空白偏移(对应 HF process_offsets)
     void trim_token_offsets(Token& t, std::size_t token_index) const;
 
     bool add_prefix_space_;
     bool trim_offsets_;
     bool use_regex_;
-    Regex regex_;  // GPT-2 正则
+    std::unique_ptr<Regex> regex_;  // use_regex_ 时构造;否则为空
 };
 
 }  // namespace bpe::pretokenizers

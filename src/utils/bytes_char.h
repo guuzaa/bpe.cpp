@@ -23,4 +23,7 @@ int char_to_byte(uint32_t cp) noexcept;
 // 把一个 byte 编码为 UTF-8 字符串(对应 HF 的 BYTES_CHAR[b])
 std::string byte_to_string(uint8_t b);
 
+// 把一个 byte 对应的 byte-char UTF-8 追加到 out(热路径,避免临时 string)
+void append_byte_char(std::string& out, uint8_t b);
+
 }  // namespace bpe::util

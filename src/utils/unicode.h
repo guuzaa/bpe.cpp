@@ -11,6 +11,9 @@
 
 namespace bpe::util {
 
+// Unicode 替换字符 U+FFFD,用于非法/无法解码的 UTF-8 序列
+constexpr uint32_t kReplacementChar = 0xFFFD;
+
 // 判断首字节给出的 UTF-8 序列长度;非法首字节返回 1(单字节替换)
 inline int utf8_seq_len(unsigned char c) {
     if (c < 0x80) {
@@ -41,49 +44,49 @@ inline std::pair<uint32_t, int> decode_utf8(const char* p, const char* end) {
 
     int len = utf8_seq_len(c0);
     if (p + len > end) {
-        return {0xFFFD, 1};
+        return {kReplacementChar, 1};
     }
 
     if (len == 1) {
         if (c0 < 0x80) {
             return {c0, 1};
         }
-        return {0xFFFD, 1};  // 非法 continuation/孤立高位字节
+        return {kReplacementChar, 1};  // 非法 continuation/孤立高位字节
     }
 
     if (len == 2) {
         auto c1 = get(1);
         if (!check_cont(c1)) {
-            return {0xFFFD, 1};
+            return {kReplacementChar, 1};
         }
         uint32_t cp = static_cast<uint32_t>((c0 & 0x1F) << 6 | (c1 & 0x3F));
         if (cp < 0x80) {
-            return {0xFFFD, 1};  // over-long
+            return {kReplacementChar, 1};  // over-long
         }
         return {cp, 2};
     }
     if (len == 3) {
         auto c1 = get(1), c2 = get(2);
         if (!check_cont(c1) || !check_cont(c2)) {
-            return {0xFFFD, 1};
+            return {kReplacementChar, 1};
         }
         uint32_t cp = static_cast<uint32_t>((c0 & 0x0F) << 12 | ((c1 & 0x3F) << 6) | (c2 & 0x3F));
         if (cp < 0x800) {
-            return {0xFFFD, 1};
+            return {kReplacementChar, 1};
         }
         if (cp >= 0xD800 && cp <= 0xDFFF) {
-            return {0xFFFD, 1};  // surrogate
+            return {kReplacementChar, 1};  // surrogate
         }
         return {cp, 3};
     }
     // len == 4
     auto c1 = get(1), c2 = get(2), c3 = get(3);
     if (!check_cont(c1) || !check_cont(c2) || !check_cont(c3)) {
-        return {0xFFFD, 1};
+        return {kReplacementChar, 1};
     }
     uint32_t cp = static_cast<uint32_t>((c0 & 0x07) << 18 | ((c1 & 0x3F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F));
     if (cp < 0x10000 || cp > 0x10FFFF) {
-        return {0xFFFD, 1};
+        return {kReplacementChar, 1};
     }
     return {cp, 4};
 }

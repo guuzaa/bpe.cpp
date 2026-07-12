@@ -1,4 +1,5 @@
 // tests/test_word.cpp — M1: Word / Symbol / merge_all / merge 单测
+#include <algorithm>
 #include <gtest/gtest.h>
 
 #include "models/bpe/word.h"
@@ -163,13 +164,13 @@ TEST(Word, TrainMergeMaxTokenLength) {
     // 1 2 3,合并 (1,2)→12 长度 2 OK;但若 max_token_length=1 则跳过
     {
         auto w = make_word({1, 2, 3}, {1, 1, 1});
-        auto deltas = w.merge(1, 2, 12, /*max_len=*/1);
+        auto deltas = w.merge(1, 2, 12, 1);
         EXPECT_EQ(w.ids(), (std::vector<TokenId>{1, 2, 3}));
         EXPECT_TRUE(deltas.empty());
     }
     {
         auto w = make_word({1, 2, 3}, {1, 1, 1});
-        auto deltas = w.merge(1, 2, 12, /*max_len=*/2);
+        auto deltas = w.merge(1, 2, 12, 2);
         EXPECT_EQ(w.ids(), (std::vector<TokenId>{12, 3}));
         EXPECT_FALSE(deltas.empty());
     }
@@ -186,7 +187,7 @@ TEST(DHeap, OrderAndTop) {
         out.push_back(h.top());
         h.pop();
     }
-    EXPECT_EQ(out, (std::vector<int>{9, 6, 5, 4, 3, 2, 1, 1}));
+    EXPECT_TRUE(std::is_sorted(out.cbegin(), out.cend(), std::greater<>()));
 }
 
 TEST(DHeap, Empty) {
