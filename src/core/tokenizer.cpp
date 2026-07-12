@@ -14,6 +14,8 @@
 #include "nlohmann/json.hpp"
 #include "normalizers/internal.h"
 #include "pretokenizers/byte_level.h"
+#include "pretokenizers/sequence.h"
+#include "pretokenizers/split.h"
 
 namespace bpe {
 
@@ -26,6 +28,70 @@ class IdentityNormalizerLocal : public Normalizer {
         (void)s;
     }
 };
+
+// 解析 Split JSON 子项:`{type:"Split", pattern:{Regex|String:...}, behavior, invert}`
+// 返回 Split PreTokenizer;若 pattern 缺失或为空则返回 nullptr
+std::unique_ptr<PreTokenizer> parse_split_pretokenizer(const nlohmann::json& p) {
+    if (!p.contains("pattern") || !p["pattern"].is_object()) {
+        return nullptr;
+    }
+    const auto& pat = p["pattern"];
+    std::string pattern_str;
+    SplitPatternKind kind = SplitPatternKind::kRegex;
+    if (pat.contains("Regex") && pat["Regex"].is_string()) {
+        pattern_str = pat["Regex"].get<std::string>();
+        kind = SplitPatternKind::kRegex;
+    } else if (pat.contains("String") && pat["String"].is_string()) {
+        pattern_str = pat["String"].get<std::string>();
+        kind = SplitPatternKind::kString;
+    } else {
+        return nullptr;
+    }
+    if (pattern_str.empty()) {
+        return nullptr;
+    }
+    std::string behavior_str =
+        (p.contains("behavior") && p["behavior"].is_string()) ? p["behavior"].get<std::string>() : "Isolated";
+    bool invert = (p.contains("invert") && p["invert"].is_boolean()) ? p["invert"].get<bool>() : false;
+    return make_split_pretokenizer(std::move(pattern_str), kind, parse_split_behavior(behavior_str), invert);
+}
+
+// SplitBehavior → 字符串(与 HF JSON 一致)
+const char* split_behavior_string(pretokenizers::SplitBehavior b) {
+    switch (b) {
+        case pretokenizers::SplitBehavior::kRemoved:
+            return "Removed";
+        case pretokenizers::SplitBehavior::kIsolated:
+            return "Isolated";
+        case pretokenizers::SplitBehavior::kMergedWithPrevious:
+            return "MergedWithPrevious";
+        case pretokenizers::SplitBehavior::kMergedWithNext:
+            return "MergedWithNext";
+        case pretokenizers::SplitBehavior::kContiguous:
+            return "Contiguous";
+    }
+    return "Isolated";
+}
+
+// 序列化单个 PreTokenizer 为 JSON;未知类型返回 nlohmann::json(nullptr)
+nlohmann::json serialize_pretokenizer(const PreTokenizer& pt) {
+    if (auto* bl = dynamic_cast<const pretokenizers::ByteLevel*>(&pt)) {
+        return {{"type", "ByteLevel"},
+                {"add_prefix_space", bl->add_prefix_space()},
+                {"trim_offsets", bl->trim_offsets()},
+                {"use_regex", bl->use_regex()}};
+    }
+    if (auto* sp = dynamic_cast<const pretokenizers::Split*>(&pt)) {
+        nlohmann::json pat = (sp->pattern_kind() == pretokenizers::SplitPatternKind::kRegex)
+                                 ? nlohmann::json{{"Regex", sp->pattern()}}
+                                 : nlohmann::json{{"String", sp->pattern()}};
+        return {{"type", "Split"},
+                {"pattern", std::move(pat)},
+                {"behavior", split_behavior_string(sp->behavior())},
+                {"invert", sp->invert()}};
+    }
+    return nullptr;
+}
 
 }  // namespace
 
@@ -385,51 +451,55 @@ absl::StatusOr<std::unique_ptr<Tokenizer>> Tokenizer::from_file(const std::strin
 
     // pre_tokenizer 段:
     //   - ByteLevel → 直接使用
-    //   - Sequence  → 在子项中找 ByteLevel,用其配置 + use_regex=true 作 fallback
-    //                 (Split 等不支持的子项被忽略,退化为标准 GPT-2 正则)
+    //   - Split     → 直接构造单个 Split
+    //   - Sequence  → 顺序组合子项(Split / ByteLevel / 其它支持的);此时
+    //                 内部 ByteLevel 的 use_regex 按其原始配置(DeepSeek 等为 false)
     //   - null / 其它 → 不设置
     if (j.contains("pre_tokenizer") && !j["pre_tokenizer"].is_null()) {
         auto& p = j["pre_tokenizer"];
         std::string type = (p.contains("type") && p["type"].is_string()) ? p["type"].get<std::string>() : "ByteLevel";
-        bool add_prefix = true;
-        bool trim_off = true;
-        bool use_re = true;
-        bool found_bl = false;
 
-        if (type == "ByteLevel") {
-            add_prefix = (p.contains("add_prefix_space") && p["add_prefix_space"].is_boolean())
-                             ? p["add_prefix_space"].get<bool>()
-                             : true;
-            trim_off =
-                (p.contains("trim_offsets") && p["trim_offsets"].is_boolean()) ? p["trim_offsets"].get<bool>() : true;
-            use_re = (p.contains("use_regex") && p["use_regex"].is_boolean()) ? p["use_regex"].get<bool>() : true;
-            found_bl = true;
+        if (type == "Split") {
+            tok->set_pretokenizer(parse_split_pretokenizer(p));
         } else if (type == "Sequence" && p.contains("pretokenizers") && p["pretokenizers"].is_array()) {
-            // 在 Sequence 中找 ByteLevel 子项
+            std::vector<std::unique_ptr<PreTokenizer>> subs;
+            subs.reserve(p["pretokenizers"].size());
             for (auto& sub : p["pretokenizers"]) {
                 std::string st =
                     (sub.contains("type") && sub["type"].is_string()) ? sub["type"].get<std::string>() : "";
-                if (st == "ByteLevel") {
-                    add_prefix = (sub.contains("add_prefix_space") && sub["add_prefix_space"].is_boolean())
-                                     ? sub["add_prefix_space"].get<bool>()
-                                     : true;
-                    trim_off = (sub.contains("trim_offsets") && sub["trim_offsets"].is_boolean())
-                                   ? sub["trim_offsets"].get<bool>()
-                                   : true;
-                    // Sequence 中的 ByteLevel 通常 use_regex=false(前面的 Split 已切分)
-                    // 我们没有 Split,故强制 use_regex=true 作 fallback
-                    use_re = true;
-                    found_bl = true;
-                    break;
+                if (st == "Split") {
+                    auto sp = parse_split_pretokenizer(sub);
+                    if (sp) {
+                        subs.push_back(std::move(sp));
+                    }
+                } else if (st == "ByteLevel") {
+                    bool add_prefix = (sub.contains("add_prefix_space") && sub["add_prefix_space"].is_boolean())
+                                          ? sub["add_prefix_space"].get<bool>()
+                                          : true;
+                    bool trim_off = (sub.contains("trim_offsets") && sub["trim_offsets"].is_boolean())
+                                        ? sub["trim_offsets"].get<bool>()
+                                        : true;
+                    bool use_re = (sub.contains("use_regex") && sub["use_regex"].is_boolean())
+                                      ? sub["use_regex"].get<bool>()
+                                      : true;
+                    subs.push_back(make_byte_level_pretokenizer(add_prefix, trim_off, use_re));
                 }
+                // 其它未知子项被忽略;如全部被忽略则 fallback 到下一阶段默认逻辑
             }
+            if (!subs.empty()) {
+                tok->set_pretokenizer(make_sequence_pretokenizer(std::move(subs)));
+            } else {
+                tok->set_pretokenizer(make_byte_level_pretokenizer(true, true, true));
+            }
+        } else if (type == "ByteLevel") {
+            bool add_prefix = (p.contains("add_prefix_space") && p["add_prefix_space"].is_boolean())
+                                  ? p["add_prefix_space"].get<bool>()
+                                  : true;
+            bool trim_off =
+                (p.contains("trim_offsets") && p["trim_offsets"].is_boolean()) ? p["trim_offsets"].get<bool>() : true;
+            bool use_re = (p.contains("use_regex") && p["use_regex"].is_boolean()) ? p["use_regex"].get<bool>() : true;
+            tok->set_pretokenizer(make_byte_level_pretokenizer(add_prefix, trim_off, use_re));
         }
-        // 如果没找到 ByteLevel,用默认值;如果找到了但 use_re=false,
-        // 因为我们不支持 Split,也强制改为 true
-        if (found_bl && !use_re) {
-            use_re = true;
-        }
-        tok->set_pretokenizer(make_byte_level_pretokenizer(add_prefix, trim_off, use_re));
     }
 
     // decoder 段:仅支持 ByteLevel / BPEDecoder(默认 ByteLevel)
@@ -504,7 +574,7 @@ absl::Status Tokenizer::to_file(const std::string& path) const {
         j["normalizer"] = nlohmann::json::object({{"type", "Identity"}});
     }
 
-    // pre_tokenizer:从实际 ByteLevel 实例读取配置(不写死)
+    // pre_tokenizer:支持 ByteLevel / Split / Sequence(Split + ByteLevel ...)
     if (impl_->pretokenizer) {
         auto* bl = dynamic_cast<pretokenizers::ByteLevel*>(impl_->pretokenizer.get());
         if (bl) {
@@ -512,6 +582,20 @@ absl::Status Tokenizer::to_file(const std::string& path) const {
                                   {"add_prefix_space", bl->add_prefix_space()},
                                   {"trim_offsets", bl->trim_offsets()},
                                   {"use_regex", bl->use_regex()}};
+        } else if (auto* sp = dynamic_cast<pretokenizers::Split*>(impl_->pretokenizer.get())) {
+            j["pre_tokenizer"] = serialize_pretokenizer(*sp);
+        } else if (auto* seq = dynamic_cast<pretokenizers::Sequence*>(impl_->pretokenizer.get())) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& sub : seq->pretokenizers()) {
+                if (!sub) {
+                    continue;
+                }
+                auto sub_json = serialize_pretokenizer(*sub);
+                if (!sub_json.is_null()) {
+                    arr.push_back(std::move(sub_json));
+                }
+            }
+            j["pre_tokenizer"] = {{"type", "Sequence"}, {"pretokenizers", std::move(arr)}};
         }
     }
     if (impl_->decoder) {

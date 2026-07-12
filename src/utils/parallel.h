@@ -10,8 +10,7 @@ namespace bpe::util {
 //   - 以 hardware_concurrency 为基准(0 时回退 default_hw)
 //   - 上限 cap(默认 16)
 //   - 不超过 work_items,至少 1
-inline unsigned decide_num_workers(std::size_t work_items, unsigned cap = 16,
-                                   unsigned default_hw = 4) noexcept {
+inline unsigned decide_num_workers(std::size_t work_items, unsigned cap = 16, unsigned default_hw = 4) noexcept {
     if (work_items == 0) {
         return 1;
     }

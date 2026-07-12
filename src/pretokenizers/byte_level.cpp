@@ -1,6 +1,5 @@
 // pretokenizers/byte_level.cpp
 #include "pretokenizers/byte_level.h"
-
 #include <algorithm>
 #include <cstdint>
 #include <vector>
@@ -79,9 +78,7 @@ void span_to_original(std::size_t sp_start, std::size_t sp_end, bool did_prefix,
         return;
     }
     // text = ' ' + original; 原文偏移 = max(0, pos - 1)
-    const auto shift = [](std::size_t pos) -> uint32_t {
-        return pos == 0 ? 0u : static_cast<uint32_t>(pos - 1);
-    };
+    const auto shift = [](std::size_t pos) -> uint32_t { return pos == 0 ? 0u : static_cast<uint32_t>(pos - 1); };
     rel_start = shift(sp_start);
     rel_end = shift(sp_end);
 }
